@@ -38,7 +38,7 @@ class PPOAlgo(BaseAlgo):
             log_value_losses = []
             log_grad_norms = []
 
-            for inds in self._get_batches_starting_indexes():
+            for inds in self._get_batches_starting_indexes(): # each iter of this for loop is a batch
                 # Initialize batch values
 
                 batch_entropy = 0
@@ -60,21 +60,32 @@ class PPOAlgo(BaseAlgo):
                     # Compute loss
 
                     if self.acmodel.recurrent:
-                        dist, value, memory = self.acmodel(sb.obs, memory * sb.mask)
+                        dist, value, memory = self.acmodel(sb.obs, memory * sb.mask) # we are starting with the #
+                        # memory we had during the original episode play; we are not replaying here, but only using
+                        # the experiences to update the model; so there is step or new 'done' encounter. So if
+                        # original sb has sb.maks==0 during one of the recurrence steps, we need to feed zero memory
+                        # to the model instead of continuing from prev step; In these recurrence steps, we are updating
+                        # ONLY the memory using the new model until a done was encountered during orig. experience
                     else:
                         dist, value = self.acmodel(sb.obs)
 
-                    entropy = dist.entropy().mean()
+                    entropy = dist.entropy().mean() # across all inds
 
-                    ratio = torch.exp(dist.log_prob(sb.action) - sb.log_prob)
+                    ratio = torch.exp(dist.log_prob(sb.action) - sb.log_prob) # first term is pi_new because we are #
+                    # using updated actor/pi model (see batch_loss.backward() below). However, the old model is not #
+                    # updated in all these 4 epochs, it is the same as recorded while experience accumulation (exps).
+                    # Shouldn't it be updated as well? Since the ratio pi_new/pi_old is calculated w.r.t. this?
                     surr1 = ratio * sb.advantage
                     surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * sb.advantage
-                    policy_loss = -torch.min(surr1, surr2).mean()
+                    policy_loss = -torch.min(surr1, surr2).mean() # across all inds
 
-                    value_clipped = sb.value + torch.clamp(value - sb.value, -self.clip_eps, self.clip_eps)
+                    value_clipped = sb.value + torch.clamp(value - sb.value, -self.clip_eps, self.clip_eps) # seems #
+                    # like we are doing something similar to pi above. We want value update to be within eps bound as
+                    # well (between old model and new model). Again similar to above, we are old updating sb.returnn
+                    # or sb.value for the entire 4 epochs. We are updating the model parameters w.r.t. these values
                     surr1 = (value - sb.returnn).pow(2)
                     surr2 = (value_clipped - sb.returnn).pow(2)
-                    value_loss = torch.max(surr1, surr2).mean()
+                    value_loss = torch.max(surr1, surr2).mean() # across all inds
 
                     loss = policy_loss - self.entropy_coef * entropy + self.value_loss_coef * value_loss
 
@@ -93,7 +104,7 @@ class PPOAlgo(BaseAlgo):
 
                 # Update batch values
 
-                batch_entropy /= self.recurrence
+                batch_entropy /= self.recurrence # all these means across recurrence steps
                 batch_value /= self.recurrence
                 batch_policy_loss /= self.recurrence
                 batch_value_loss /= self.recurrence
@@ -118,7 +129,7 @@ class PPOAlgo(BaseAlgo):
         # Log some values
 
         logs = {
-            "entropy": numpy.mean(log_entropies),
+            "entropy": numpy.mean(log_entropies), # note these are only for the last epoch; prev are overwritten
             "value": numpy.mean(log_values),
             "policy_loss": numpy.mean(log_policy_losses),
             "value_loss": numpy.mean(log_value_losses),
@@ -146,7 +157,7 @@ class PPOAlgo(BaseAlgo):
 
         # Shift starting indexes by self.recurrence//2 half the time
         if self.batch_num % 2 == 1:
-            indexes = indexes[(indexes + self.recurrence) % self.num_frames_per_proc != 0]
+            indexes = indexes[(indexes + self.recurrence) % self.num_frames_per_proc != 0]# we are avoiding the last # index towards the process boundary; this index + recurrence = end of that process timesteps/boundary; # # since we have 16 processes, indexes will now be 1024 - 16 = 1008; the reason is that we will step into # next process timesteps (which are no way related to the current process) if we count recurrence number # of timesteps from indexes + recurrence//2 (as we do in below line).
             indexes += self.recurrence // 2
         self.batch_num += 1
 

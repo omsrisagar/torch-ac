@@ -1,8 +1,8 @@
 from multiprocessing import Process, Pipe
 import gym
 
-def worker(conn, env):
-    while True:
+def worker(conn, env): # this function works on remote; it uses remote.recv() to receives commands to execute.
+    while True: # local sends these commands. remote is the remote worker thread.
         cmd, data = conn.recv()
         if cmd == "step":
             obs, reward, done, info = env.step(data)
@@ -26,7 +26,7 @@ class ParallelEnv(gym.Env):
         self.action_space = self.envs[0].action_space
 
         self.locals = []
-        for env in self.envs[1:]:
+        for env in self.envs[1:]: # why start from 1 instead of 0
             local, remote = Pipe()
             self.locals.append(local)
             p = Process(target=worker, args=(remote, env))
@@ -44,7 +44,7 @@ class ParallelEnv(gym.Env):
         for local, action in zip(self.locals, actions[1:]):
             local.send(("step", action))
         obs, reward, done, info = self.envs[0].step(actions[0])
-        if done:
+        if done: # why are we doing first one manually
             obs = self.envs[0].reset()
         results = zip(*[(obs, reward, done, info)] + [local.recv() for local in self.locals])
         return results

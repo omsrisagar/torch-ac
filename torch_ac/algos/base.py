@@ -123,13 +123,18 @@ class BaseAlgo(ABC):
             reward, policy loss, value loss, etc.
         """
 
-        for i in range(self.num_frames_per_proc):
+        for i in range(self.num_frames_per_proc): # all 16 proc indep. collect experiences for 128 frames; resetting # the relevant values when done and then restarting the metrics from there.
             # Do one agent-environment interaction
-
+            # self.obs and self.memory are maintained from step to step; latter resetting to 0 when done and former # resetting to a new environment when done
             preprocessed_obs = self.preprocess_obss(self.obs, device=self.device)
             with torch.no_grad():
                 if self.acmodel.recurrent:
-                    dist, value, memory = self.acmodel(preprocessed_obs, self.memory * self.mask.unsqueeze(1))
+                    dist, value, memory = self.acmodel(preprocessed_obs, self.memory * self.mask.unsqueeze(1)) # if #
+                    # done we are resetting the memory for that process, else the memory is passed till the episode #
+                    # ends. This is done independently for each process.
+                    # Note that we are not resetting this memory everytime we call this func. This function is called
+                    # every 2048 frames that's it,nothing to do with episode ending or starting which can happen
+                    # anywhere and any number of times within in 2048 frames (i.e., 128 frames for 16 indep. procs)
                 else:
                     dist, value = self.acmodel(preprocessed_obs)
             action = dist.sample()
@@ -165,11 +170,14 @@ class BaseAlgo(ABC):
             for i, done_ in enumerate(done):
                 if done_:
                     self.log_done_counter += 1
-                    self.log_return.append(self.log_episode_return[i].item())
+                    self.log_return.append(self.log_episode_return[i].item()) # note that these are also not reset # whenever this function is called.
                     self.log_reshaped_return.append(self.log_episode_reshaped_return[i].item())
                     self.log_num_frames.append(self.log_episode_num_frames[i].item())
 
-            self.log_episode_return *= self.mask
+            self.log_episode_return *= self.mask # reset to 0 for those proc which are done, so it can accum again
+            # we are resetting episode rewards, episode frames/timesteps, self.memory that is given to acmodel as
+            # input to 0 when done (mask=0) independently for each of 16 copies. Then we continue/restart
+            # independently of others.
             self.log_episode_reshaped_return *= self.mask
             self.log_episode_num_frames *= self.mask
 
@@ -200,10 +208,10 @@ class BaseAlgo(ABC):
 
         exps = DictList()
         exps.obs = [self.obss[i][j]
-                    for j in range(self.num_procs)
-                    for i in range(self.num_frames_per_proc)]
+                    for j in range(self.num_procs) # outer loop
+                    for i in range(self.num_frames_per_proc)] # inner loop; so for fixed j, iterate i and repeat for j+1
         if self.acmodel.recurrent:
-            # T x P x D -> P x T x D -> (P * T) x D
+            # T x P x D -> P x T x D -> (P * T) x D # for each process, list all 128 episode steps;
             exps.memory = self.memories.transpose(0, 1).reshape(-1, *self.memories.shape[2:])
             # T x P -> P x T -> (P * T) x 1
             exps.mask = self.masks.transpose(0, 1).reshape(-1).unsqueeze(1)
@@ -221,17 +229,24 @@ class BaseAlgo(ABC):
 
         # Log some values
 
-        keep = max(self.log_done_counter, self.num_procs)
+        keep = max(self.log_done_counter, self.num_procs) # can it ever be > num_procs? Yes, as in 128 steps,
+        # each process can end and start again more than once.
 
         logs = {
-            "return_per_episode": self.log_return[-keep:],
+            "return_per_episode": self.log_return[-keep:], # returns per episode for all the 16 processes
+            # we will log all the new values with a minimum of 16. If new values < 16, then take the old values.
             "reshaped_return_per_episode": self.log_reshaped_return[-keep:],
-            "num_frames_per_episode": self.log_num_frames[-keep:],
-            "num_frames": self.num_frames
+            "num_frames_per_episode": self.log_num_frames[-keep:], # frames at which done occurred
+            "num_frames": self.num_frames # number of frames for this experience collection (fixed to 2048)
         }
 
         self.log_done_counter = 0
-        self.log_return = self.log_return[-self.num_procs:]
+        self.log_return = self.log_return[-self.num_procs:] # just a position holder for list of 16 values; just a
+        # list # of 16 values as all the done information is captured in logs above (say you have 28 dones in these
+        # 128 steps # of 16 processes, you log all the 28 done information above, but keep the last 16 done information.
+        # prev info: keep only the last 16 values; we will append new values to these in the next run of 128 steps.
+        # The reason we are keeping these is: we need some previous values (in above step) in case new values logged
+        # in next run is < 16
         self.log_reshaped_return = self.log_reshaped_return[-self.num_procs:]
         self.log_num_frames = self.log_num_frames[-self.num_procs:]
 
